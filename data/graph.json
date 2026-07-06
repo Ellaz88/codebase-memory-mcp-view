@@ -1,0 +1,138 @@
+{
+  "meta": {
+    "name": "Codebase Memory MCP Demo Graph",
+    "description": "Small demo graph for the mobile-first 3D viewer.",
+    "version": "1.0.0"
+  },
+  "nodes": [
+    {
+      "id": "repo",
+      "label": "Repository",
+      "type": "root",
+      "path": "Ellaz88/codebase-memory-mcp-view",
+      "size": 36,
+      "color": "#7dd3fc"
+    },
+    {
+      "id": "index",
+      "label": "index.html",
+      "type": "entry",
+      "path": "/index.html",
+      "size": 24,
+      "color": "#a78bfa"
+    },
+    {
+      "id": "app",
+      "label": "app.js",
+      "type": "viewer",
+      "path": "/app.js",
+      "size": 30,
+      "color": "#22c55e"
+    },
+    {
+      "id": "styles",
+      "label": "styles.css",
+      "type": "style",
+      "path": "/styles.css",
+      "size": 22,
+      "color": "#f59e0b"
+    },
+    {
+      "id": "data",
+      "label": "data/graph.json",
+      "type": "data",
+      "path": "/data/graph.json",
+      "size": 26,
+      "color": "#ec4899"
+    },
+    {
+      "id": "three",
+      "label": "Three.js CDN",
+      "type": "dependency",
+      "path": "https://cdn.jsdelivr.net/npm/three",
+      "size": 20,
+      "color": "#38bdf8"
+    },
+    {
+      "id": "upload",
+      "label": "File Upload",
+      "type": "feature",
+      "path": "Local JSON loader",
+      "size": 18,
+      "color": "#34d399"
+    },
+    {
+      "id": "share",
+      "label": "Share Link",
+      "type": "feature",
+      "path": "?graph=",
+      "size": 18,
+      "color": "#f472b6"
+    },
+    {
+      "id": "panel",
+      "label": "Node Panel",
+      "type": "feature",
+      "path": "Tap node details",
+      "size": 18,
+      "color": "#facc15"
+    }
+  ],
+  "edges": [
+    {
+      "source": "repo",
+      "target": "index",
+      "type": "contains"
+    },
+    {
+      "source": "repo",
+      "target": "app",
+      "type": "contains"
+    },
+    {
+      "source": "repo",
+      "target": "styles",
+      "type": "contains"
+    },
+    {
+      "source": "repo",
+      "target": "data",
+      "type": "contains"
+    },
+    {
+      "source": "index",
+      "target": "app",
+      "type": "loads"
+    },
+    {
+      "source": "index",
+      "target": "styles",
+      "type": "loads"
+    },
+    {
+      "source": "app",
+      "target": "three",
+      "type": "imports"
+    },
+    {
+      "source": "app",
+      "target": "data",
+      "type": "fetches"
+    },
+    {
+      "source": "app",
+      "target": "upload",
+      "type": "supports"
+    },
+    {
+      "source": "app",
+      "target": "share",
+      "type": "supports"
+    },
+    {
+      "source": "app",
+      "target": "panel",
+      "type": "supports"
+    }
+  ]
+}
