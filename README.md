@@ -1,29 +1,97 @@
 # 3D Codebase Graph Viewer
 
-This branch contains a production-ready static 3D graph viewer intended for mobile use (iPhone 17). It uses Three.js and serves as a static site — no build step required. Files included in the repo root:
+Production-ready, mobile-first static 3D graph viewer for `Ellaz88/codebase-memory-mcp-view`.
 
-- index.html — entry point
-- styles.css — mobile-first styles
-- app.js — main 3D viewer (ES module + three.js CDN)
-- data/graph.json — sample embedded graph to demo
+This branch is designed for direct Vercel deployment with no build step.
 
-How to deploy on Vercel (manual)
-1. Go to https://vercel.com/new and import this repository.
-2. Project settings:
-   - Framework Preset: Other
-   - Root Directory: /
-   - Build Command: (leave empty)
-   - Output Directory: (leave empty)
-3. Click Deploy.
+## Files
 
-Using the viewer on iPhone
-- Open the deployed URL on your iPhone.
-- The viewer will load /data/graph.json by default. To load a graph hosted elsewhere, append ?graph=<raw-URL> to the URL.
-  Example: https://your-site.vercel.app/?graph=https://raw.githubusercontent.com/user/repo/branch/path/graph.json
-- Tap nodes to open a details panel. Use pinch-to-zoom & drag to pan. Use the Share button to copy a link for WhatsApp.
+```text
+/
+├── index.html
+├── styles.css
+├── app.js
+└── data/
+    └── graph.json
+```
 
-Notes & next steps
-- The app assumes node positions (x,y,z) may be present. If your graph doesn't include coordinates, the viewer will compute a client-side force layout for small-to-medium graphs. For very large graphs, it falls back to random positions and recommends server-side layout generation.
-- For very large graphs (>5k nodes) performance may be limited on phones; I can add LOD/clustering/progressive loading if needed.
+## What it does
 
-If you want additional design polish (icons, animations, improved color system, accessibility improvements, or server-hosted graph loading), I will implement next after your approval.
+- Loads `/data/graph.json` by default.
+- Supports external graph loading with `?graph=<encoded-json-url>`.
+- Supports local JSON file upload from iPhone Files app or desktop.
+- Uses Three.js ES modules from a CDN.
+- Renders nodes with `InstancedMesh` for better mobile performance.
+- Renders edges as 3D line segments.
+- Computes a client-side 3D force-directed layout when nodes lack `x`, `y`, and `z` coordinates.
+- Falls back to a deterministic spherical layout for very large graphs.
+- Supports tap-to-open node details, camera fit, and share-link copy.
+- Tuned for iPhone/mobile safe-area layout and touch navigation.
+
+## Graph format
+
+Minimum valid graph:
+
+```json
+{
+  "nodes": [
+    { "id": "a", "label": "Node A" },
+    { "id": "b", "label": "Node B" }
+  ],
+  "edges": [
+    { "source": "a", "target": "b", "type": "depends_on" }
+  ]
+}
+```
+
+Optional node fields:
+
+```json
+{
+  "id": "app",
+  "label": "app.js",
+  "type": "viewer",
+  "path": "/app.js",
+  "size": 30,
+  "color": "#22c55e",
+  "x": 0,
+  "y": 120,
+  "z": -80
+}
+```
+
+If `x`, `y`, and `z` are missing, the app computes positions in the browser.
+
+## Vercel deployment settings
+
+Use these settings when importing the GitHub repository into Vercel:
+
+- Framework Preset: `Other`
+- Root Directory: `/`
+- Build Command: leave empty
+- Output Directory: leave empty
+- Branch to deploy: `add-3d-graph-viewer`
+
+## iPhone usage
+
+1. Open the deployed `vercel.app` URL in Safari or Chrome.
+2. The demo graph loads automatically from `/data/graph.json`.
+3. Tap and drag to rotate, pinch to zoom, and two-finger drag to pan.
+4. Tap a node to open its details panel.
+5. Tap **Upload** to load your own `graph.json` from the iPhone Files app.
+6. Tap **Fit** to refocus the camera.
+7. Tap **Share** to copy the current viewer link.
+
+## Validation checklist
+
+After deployment:
+
+- `/` returns HTTP 200.
+- `/data/graph.json` returns HTTP 200.
+- `/data/graph.json` parses as JSON.
+- The page displays node and edge counts.
+- Tapping a node opens the details panel.
+
+## Notes
+
+For very large graphs, client-side layout can become expensive on mobile. For graphs above several thousand nodes, generate `x`, `y`, and `z` positions server-side or add clustering/progressive loading.
