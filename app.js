@@ -1,422 +1,554 @@
-// 3D Graph Viewer (plain Three.js, mobile-optimized)
-import * as THREE from 'https://unpkg.com/three@0.153.0/build/three.module.js';
-import { OrbitControls } from 'https://unpkg.com/three@0.153.0/examples/jsm/controls/OrbitControls.js';
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js';
+import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/controls/OrbitControls.js';
 
-const canvas = document.getElementById('three-canvas');
-const loadingEl = document.getElementById('loading');
-const fileInput = document.getElementById('fileInput');
-const fitBtn = document.getElementById('fitBtn');
-const shareBtn = document.getElementById('shareBtn');
-const panel = document.getElementById('panel');
-const closePanel = document.getElementById('closePanel');
-const nodeInfo = document.getElementById('nodeInfo');
-const toast = document.getElementById('toast');
+const DEFAULT_GRAPH_URL = '/data/graph.json';
+const MAX_FORCE_LAYOUT_NODES = 900;
+const FORCE_ITERATIONS = 260;
 
-let scene, camera, renderer, controls;
-let nodeMesh = null; // InstancedMesh
-let edgeLines = null;
-let raycaster, pointer;
-let graph = null;
-let nodeIdToIndex = new Map();
-let nodeObjects = []; // store positions for camera fit
+const els = {
+  canvas: document.getElementById('threeCanvas'),
+  viewer: document.getElementById('viewer'),
+  loading: document.getElementById('loading'),
+  toast: document.getElementById('toast'),
+  fileInput: document.getElementById('fileInput'),
+  fitBtn: document.getElementById('fitBtn'),
+  shareBtn: document.getElementById('shareBtn'),
+  status: document.getElementById('graphStatus'),
+  source: document.getElementById('graphSource'),
+  nodeCount: document.getElementById('nodeCount'),
+  edgeCount: document.getElementById('edgeCount'),
+  panel: document.getElementById('nodePanel'),
+  closePanel: document.getElementById('closePanelBtn'),
+  panelTitle: document.getElementById('panelTitle'),
+  panelDetails: document.getElementById('panelDetails')
+};
 
-function showToast(msg, timeout=1500){
-  toast.textContent = msg; toast.classList.remove('hidden');
-  setTimeout(()=>toast.classList.add('hidden'), timeout);
+let scene;
+let camera;
+let renderer;
+let controls;
+let raycaster;
+let pointer;
+let nodesMesh = null;
+let edgesLine = null;
+let haloMesh = null;
+let graph = { nodes: [], edges: [] };
+let normalizedNodes = [];
+let normalizedEdges = [];
+let idToIndex = new Map();
+let positions = [];
+let activeGraphUrl = DEFAULT_GRAPH_URL;
+let selectedIndex = -1;
+let downPoint = null;
+
+boot();
+
+async function boot() {
+  try {
+    initScene();
+    bindEvents();
+    animate();
+    const urlParam = new URLSearchParams(window.location.search).get('graph');
+    activeGraphUrl = urlParam || DEFAULT_GRAPH_URL;
+    await loadGraphFromUrl(activeGraphUrl);
+  } catch (error) {
+    showError(error);
+  }
 }
 
-function initThree(){
+function initScene() {
   scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x03040a);
+  scene.background = new THREE.Color(0x050816);
+  scene.fog = new THREE.FogExp2(0x050816, 0.0009);
 
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  renderer = new THREE.WebGLRenderer({canvas, antialias: true, alpha: false});
-  renderer.setPixelRatio(dpr);
-  renderer.setSize(canvas.clientWidth, canvas.clientHeight, false);
-  renderer.setClearColor(0x03040a);
+  const { width, height } = viewportSize();
+  camera = new THREE.PerspectiveCamera(52, width / height, 0.1, 100000);
+  camera.position.set(0, 0, 780);
 
-  camera = new THREE.PerspectiveCamera(50, canvas.clientWidth / canvas.clientHeight, 1, 100000);
-  camera.position.set(0, 0, 800);
-
-  const hemi = new THREE.HemisphereLight(0xffffff, 0x080820, 0.9);
-  scene.add(hemi);
-  const dir = new THREE.DirectionalLight(0xffffff, 0.6);
-  dir.position.set(100, 200, 100);
-  scene.add(dir);
+  renderer = new THREE.WebGLRenderer({ canvas: els.canvas, antialias: true, alpha: false, powerPreference: 'high-performance' });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(width, height, false);
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
 
   controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
-  controls.dampingFactor = 0.08;
-  controls.rotateSpeed = 0.4;
-  controls.zoomSpeed = 0.8;
-  controls.panSpeed = 0.8;
-  controls.minDistance = 20;
-
-  // Touch-friendly settings
-  controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
+  controls.dampingFactor = 0.075;
+  controls.rotateSpeed = 0.55;
+  controls.zoomSpeed = 0.72;
+  controls.panSpeed = 0.65;
+  controls.minDistance = 30;
+  controls.maxDistance = 8000;
 
   raycaster = new THREE.Raycaster();
   pointer = new THREE.Vector2();
 
-  window.addEventListener('resize', onResize);
-  renderer.domElement.addEventListener('pointerdown', onPointerDown);
+  const ambient = new THREE.AmbientLight(0x9fc5ff, 1.15);
+  scene.add(ambient);
+
+  const keyLight = new THREE.DirectionalLight(0xffffff, 1.2);
+  keyLight.position.set(240, 420, 540);
+  scene.add(keyLight);
+
+  const fillLight = new THREE.PointLight(0x7dd3fc, 1.1, 2400);
+  fillLight.position.set(-420, -140, 500);
+  scene.add(fillLight);
 }
 
-function onResize(){
-  if (!renderer) return;
-  const w = canvas.clientWidth;
-  const h = canvas.clientHeight;
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
-  renderer.setSize(w, h, false);
-}
+function bindEvents() {
+  window.addEventListener('resize', resizeRenderer, { passive: true });
+  window.addEventListener('orientationchange', () => setTimeout(resizeRenderer, 250), { passive: true });
 
-function onPointerDown(ev){
-  const rect = canvas.getBoundingClientRect();
-  pointer.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
-  pointer.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
+  els.fitBtn.addEventListener('click', () => fitCamera(true));
+  els.shareBtn.addEventListener('click', shareCurrentGraph);
+  els.closePanel.addEventListener('click', closePanel);
 
-  raycaster.setFromCamera(pointer, camera);
-  if (nodeMesh){
-    const intersects = raycaster.intersectObject(nodeMesh);
-    if (intersects.length){
-      const inst = intersects[0].instanceId;
-      if (inst !== undefined && inst !== null) onNodeSelect(inst);
+  els.fileInput.addEventListener('change', async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      setLoading(`Loading ${file.name}…`);
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      activeGraphUrl = '';
+      renderGraph(parsed, file.name);
+      toast(`Loaded ${file.name}`);
+    } catch (error) {
+      showError(error);
+    } finally {
+      event.target.value = '';
     }
+  });
+
+  els.canvas.addEventListener('pointerdown', (event) => {
+    downPoint = { x: event.clientX, y: event.clientY, t: performance.now() };
+  }, { passive: true });
+
+  els.canvas.addEventListener('pointerup', (event) => {
+    if (!downPoint) return;
+    const dx = event.clientX - downPoint.x;
+    const dy = event.clientY - downPoint.y;
+    const distance = Math.hypot(dx, dy);
+    const duration = performance.now() - downPoint.t;
+    downPoint = null;
+    if (distance <= 12 && duration < 700) pickNode(event);
+  }, { passive: true });
+}
+
+async function loadGraphFromUrl(url) {
+  try {
+    setLoading(`Fetching ${shortSource(url)}…`);
+    const response = await fetch(url, { cache: 'no-cache' });
+    if (!response.ok) throw new Error(`Graph fetch failed: HTTP ${response.status} for ${url}`);
+    const data = await response.json();
+    renderGraph(data, url);
+  } catch (error) {
+    throw new Error(`${error.message}. Check that the graph URL is reachable and returns valid JSON.`);
   }
 }
 
-function buildSceneFromGraph(g){
-  // If nodes don't have coordinates, compute client-side layout
-  if (g && Array.isArray(g.nodes) && g.nodes.length){
-    const needsCoords = g.nodes.some(n => typeof n.x !== 'number' || typeof n.y !== 'number' || typeof n.z !== 'number');
-    if (needsCoords){
-      // For very large graphs, skip heavy layout and fallback to random + recommend server-side export
-      const MAX_LAYOUT = 1500;
-      if (g.nodes.length <= MAX_LAYOUT){
-        computeForceLayout3D(g, {iterations: 900, width: 800, height: 800, depth: 800});
-      } else {
-        // fallback random positions
-        for (let i=0;i<g.nodes.length;i++){
-          g.nodes[i].x = (Math.random()-0.5)*1200;
-          g.nodes[i].y = (Math.random()-0.5)*1200;
-          g.nodes[i].z = (Math.random()-0.5)*1200;
-        }
-        showToast('Large graph: using random positions. Consider server-side layout for best results.');
+function renderGraph(input, sourceLabel) {
+  graph = normalizeGraph(input);
+  normalizedNodes = graph.nodes;
+  normalizedEdges = graph.edges;
+  idToIndex = new Map(normalizedNodes.map((node, index) => [node.id, index]));
+  positions = computePositions(normalizedNodes, normalizedEdges);
+
+  clearGraphObjects();
+  createNodeInstances();
+  createEdges();
+  createHalo();
+  updateHud(sourceLabel);
+  fitCamera(false);
+  closePanel();
+  els.loading.classList.add('hidden');
+}
+
+function normalizeGraph(input) {
+  if (!input || typeof input !== 'object') throw new Error('Graph JSON must be an object.');
+  const rawNodes = Array.isArray(input.nodes) ? input.nodes : [];
+  const rawEdges = Array.isArray(input.edges) ? input.edges : Array.isArray(input.links) ? input.links : [];
+  if (!rawNodes.length) throw new Error('Graph JSON must include a non-empty nodes array.');
+
+  const seen = new Set();
+  const nodes = rawNodes.map((node, index) => {
+    const id = String(node.id ?? node.key ?? node.name ?? index);
+    if (seen.has(id)) throw new Error(`Duplicate node id: ${id}`);
+    seen.add(id);
+    return {
+      ...node,
+      id,
+      label: String(node.label ?? node.name ?? node.path ?? id),
+      size: clampNumber(Number(node.size ?? node.value ?? node.weight ?? 18), 8, 60),
+      color: safeColor(node.color, index)
+    };
+  });
+
+  const validIds = new Set(nodes.map((node) => node.id));
+  const edges = rawEdges.map((edge) => {
+    const source = endpointToId(edge.source ?? edge.from);
+    const target = endpointToId(edge.target ?? edge.to);
+    return { ...edge, source, target };
+  }).filter((edge) => validIds.has(edge.source) && validIds.has(edge.target) && edge.source !== edge.target);
+
+  return { nodes, edges };
+}
+
+function endpointToId(value) {
+  if (value && typeof value === 'object') return String(value.id ?? value.key ?? value.name ?? '');
+  return String(value ?? '');
+}
+
+function computePositions(nodes, edges) {
+  const everyNodeHas3D = nodes.every((node) => finite(node.x) && finite(node.y) && finite(node.z));
+  if (everyNodeHas3D) return nodes.map((node) => new THREE.Vector3(Number(node.x), Number(node.y), Number(node.z)));
+
+  if (nodes.length > MAX_FORCE_LAYOUT_NODES) return sphericalFallback(nodes.length);
+
+  return forceLayout(nodes, edges);
+}
+
+function forceLayout(nodes, edges) {
+  const count = nodes.length;
+  const vectors = [];
+  const velocities = [];
+  const radius = Math.max(160, Math.sqrt(count) * 72);
+
+  for (let i = 0; i < count; i += 1) {
+    const seed = hashString(nodes[i].id);
+    const theta = (seed % 6283) / 1000;
+    const phi = (((seed >> 8) % 3141) / 3141) * Math.PI;
+    const r = radius * (0.45 + ((seed >> 16) % 1000) / 1650);
+    vectors.push(new THREE.Vector3(
+      Math.cos(theta) * Math.sin(phi) * r,
+      Math.sin(theta) * Math.sin(phi) * r,
+      Math.cos(phi) * r
+    ));
+    velocities.push(new THREE.Vector3());
+  }
+
+  const indexById = new Map(nodes.map((node, index) => [node.id, index]));
+  const indexedEdges = edges.map((edge) => [indexById.get(edge.source), indexById.get(edge.target)])
+    .filter(([a, b]) => Number.isInteger(a) && Number.isInteger(b));
+
+  for (let iteration = 0; iteration < FORCE_ITERATIONS; iteration += 1) {
+    const cooling = 1 - iteration / FORCE_ITERATIONS;
+    const repulsion = 4600 * cooling;
+    const attraction = 0.006 + 0.012 * cooling;
+
+    for (let i = 0; i < count; i += 1) {
+      for (let j = i + 1; j < count; j += 1) {
+        const delta = vectors[i].clone().sub(vectors[j]);
+        let distSq = Math.max(delta.lengthSq(), 80);
+        const force = repulsion / distSq;
+        delta.normalize().multiplyScalar(force);
+        velocities[i].add(delta);
+        velocities[j].sub(delta);
       }
     }
-  }
 
-  // Clear previous
-  while(scene.children.length>0){
-    scene.remove(scene.children[0]);
-  }
-  // add lights again
-  scene.add(new THREE.HemisphereLight(0xffffff, 0x080820, 0.9));
-  const dir = new THREE.DirectionalLight(0xffffff, 0.6);
-  dir.position.set(100,200,100);
-  scene.add(dir);
-
-  nodeIdToIndex.clear(); nodeObjects = [];
-
-  const nodes = g.nodes || [];
-  const edges = g.edges || [];
-
-  // Build instanced mesh for nodes
-  const sphereGeom = new THREE.SphereGeometry(1, 12, 12);
-  const maxNodes = Math.max(1, nodes.length);
-  const instMesh = new THREE.InstancedMesh(sphereGeom, new THREE.MeshStandardMaterial({color:0x66b2ff}), maxNodes);
-  instMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-
-  // Per-instance color attribute
-  const colorAttr = new Float32Array(maxNodes * 3);
-
-  for (let i=0;i<nodes.length;i++){
-    const n = nodes[i];
-    const id = n.id ?? i;
-    nodeIdToIndex.set(String(id), i);
-
-    // position now should exist
-    const x = (typeof n.x === 'number') ? n.x : (Math.random()-0.5)*600;
-    const y = (typeof n.y === 'number') ? n.y : (Math.random()-0.5)*600;
-    const z = (typeof n.z === 'number') ? n.z : (Math.random()-0.5)*600;
-
-    const size = Math.max(6, (n.size ?? 20) / 2);
-
-    const mat = new THREE.Matrix4();
-    mat.compose(new THREE.Vector3(x,y,z), new THREE.Quaternion(), new THREE.Vector3(size,size,size));
-    instMesh.setMatrixAt(i, mat);
-
-    const col = new THREE.Color(n.color ?? '#60a5fa');
-    colorAttr[i*3+0] = col.r; colorAttr[i*3+1] = col.g; colorAttr[i*3+2] = col.b;
-
-    nodeObjects.push({id, x,y,z,meta:n});
-  }
-
-  // Attach color attribute to geometry for later shader use (not applied by default material)
-  try{
-    instMesh.geometry.setAttribute('instanceColor', new THREE.InstancedBufferAttribute(colorAttr,3));
-  }catch(e){/* ignore if not supported */}
-
-  scene.add(instMesh);
-  nodeMesh = instMesh;
-
-  // Build edges as LineSegments
-  if (edges.length){
-    const positions = new Float32Array(edges.length * 6);
-    let idx = 0;
-    for (let i=0;i<edges.length;i++){
-      const e = edges[i];
-      const s = nodeObjects.find(n=>String(n.id) === String(e.source));
-      const t = nodeObjects.find(n=>String(n.id) === String(e.target));
-      if (!s || !t) continue;
-      positions[idx++] = s.x; positions[idx++] = s.y; positions[idx++] = s.z;
-      positions[idx++] = t.x; positions[idx++] = t.y; positions[idx++] = t.z;
+    for (const [a, b] of indexedEdges) {
+      const delta = vectors[b].clone().sub(vectors[a]);
+      const distance = Math.max(delta.length(), 1);
+      const desired = 135;
+      const force = (distance - desired) * attraction;
+      delta.normalize().multiplyScalar(force);
+      velocities[a].add(delta);
+      velocities[b].sub(delta);
     }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    const mat = new THREE.LineBasicMaterial({color:0x3f88a6});
-    const lines = new THREE.LineSegments(geo, mat);
-    scene.add(lines);
-    edgeLines = lines;
-  }
 
-  // Add simple labels as sprites (only for small graphs)
-  if (nodes.length <= 200){
-    for (let i=0;i<nodes.length;i++){
-      const n = nodes[i];
-      const text = (n.name || n.label || String(n.id)).toString();
-      const sprite = makeTextSprite(text, {fontsize: 18});
-      sprite.position.set(nodeObjects[i].x, nodeObjects[i].y + (n.size? n.size/2 : 12), nodeObjects[i].z);
-      scene.add(sprite);
+    for (let i = 0; i < count; i += 1) {
+      const centerPull = vectors[i].clone().multiplyScalar(-0.0025);
+      velocities[i].add(centerPull);
+      velocities[i].multiplyScalar(0.78);
+      vectors[i].add(velocities[i]);
     }
   }
 
-  // store graph for interactions
-  graph = g;
-
-  // hide loading overlay
-  loadingEl.style.display = 'none';
-
-  // fit camera
-  fitToNodes();
+  return vectors;
 }
 
-function makeTextSprite(message, parameters = {}){
-  const fontface = parameters.hasOwnProperty('fontface') ? parameters['fontface'] : 'Arial';
-  const fontsize = parameters.hasOwnProperty('fontsize') ? parameters['fontsize'] : 24;
-  const canvas = document.createElement('canvas');
-  const context = canvas.getContext('2d');
-  context.font = `${fontsize}px ${fontface}`;
-  const metrics = context.measureText(message);
-  const textWidth = metrics.width;
-  canvas.width = Math.min(600, Math.ceil(textWidth) + 20);
-  canvas.height = fontsize + 20;
-  context.font = `${fontsize}px ${fontface}`;
-  context.fillStyle = 'rgba(230,238,246,1)';
-  context.fillText(message, 10, fontsize + 4);
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.minFilter = THREE.LinearFilter;
-  const spriteMaterial = new THREE.SpriteMaterial({map: texture, depthTest: false});
-  const sprite = new THREE.Sprite(spriteMaterial);
-  sprite.scale.set(canvas.width * 0.5, canvas.height * 0.5, 1);
-  return sprite;
-}
-
-function onNodeSelect(instanceIndex){
-  const info = nodeObjects[instanceIndex];
-  if (!info) return;
-  nodeInfo.textContent = JSON.stringify(info.meta || info, null, 2);
-  panel.classList.remove('hidden');
-  panel.setAttribute('aria-hidden','false');
-  const target = new THREE.Vector3(info.x, info.y, info.z);
-  flyTo(target);
-}
-
-function flyTo(target){
-  const startPos = camera.position.clone();
-  const startLook = controls.target.clone();
-  const endPos = target.clone().add(new THREE.Vector3(0,0,Math.max(120, 0.6*controls.getDistance())));
-  const endLook = target.clone();
-  const duration = 400;
-  const t0 = performance.now();
-  function step(now){
-    const t = Math.min(1, (now - t0) / duration);
-    camera.position.lerpVectors(startPos, endPos, easeOutCubic(t));
-    controls.target.lerpVectors(startLook, endLook, easeOutCubic(t));
-    controls.update();
-    if (t < 1) requestAnimationFrame(step);
+function sphericalFallback(count) {
+  const vectors = [];
+  const radius = Math.max(380, Math.sqrt(count) * 32);
+  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+  for (let i = 0; i < count; i += 1) {
+    const y = 1 - (i / Math.max(1, count - 1)) * 2;
+    const radial = Math.sqrt(Math.max(0, 1 - y * y));
+    const theta = goldenAngle * i;
+    vectors.push(new THREE.Vector3(Math.cos(theta) * radial * radius, y * radius, Math.sin(theta) * radial * radius));
   }
-  requestAnimationFrame(step);
+  return vectors;
 }
-function easeOutCubic(t){return 1 - Math.pow(1 - t, 3)}
 
-function fitToNodes(){
-  if (!nodeObjects.length) return;
+function createNodeInstances() {
+  const geometry = new THREE.SphereGeometry(1, 18, 12);
+  const material = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    roughness: 0.62,
+    metalness: 0.18,
+    vertexColors: true
+  });
+
+  nodesMesh = new THREE.InstancedMesh(geometry, material, normalizedNodes.length);
+  nodesMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+
+  const dummy = new THREE.Object3D();
+  const color = new THREE.Color();
+
+  normalizedNodes.forEach((node, index) => {
+    dummy.position.copy(positions[index]);
+    const scale = node.size;
+    dummy.scale.set(scale, scale, scale);
+    dummy.updateMatrix();
+    nodesMesh.setMatrixAt(index, dummy.matrix);
+    color.set(node.color);
+    nodesMesh.setColorAt(index, color);
+  });
+
+  nodesMesh.userData.type = 'nodes';
+  scene.add(nodesMesh);
+}
+
+function createEdges() {
+  if (!normalizedEdges.length) return;
+  const coords = new Float32Array(normalizedEdges.length * 2 * 3);
+  let cursor = 0;
+  for (const edge of normalizedEdges) {
+    const sourceIndex = idToIndex.get(edge.source);
+    const targetIndex = idToIndex.get(edge.target);
+    const source = positions[sourceIndex];
+    const target = positions[targetIndex];
+    coords[cursor++] = source.x;
+    coords[cursor++] = source.y;
+    coords[cursor++] = source.z;
+    coords[cursor++] = target.x;
+    coords[cursor++] = target.y;
+    coords[cursor++] = target.z;
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(coords, 3));
+  const material = new THREE.LineBasicMaterial({ color: 0x8fb7ff, transparent: true, opacity: 0.34 });
+  edgesLine = new THREE.LineSegments(geometry, material);
+  scene.add(edgesLine);
+}
+
+function createHalo() {
+  const geometry = new THREE.RingGeometry(1, 1.3, 48);
+  const material = new THREE.MeshBasicMaterial({ color: 0x7dd3fc, transparent: true, opacity: 0.9, side: THREE.DoubleSide });
+  haloMesh = new THREE.Mesh(geometry, material);
+  haloMesh.visible = false;
+  scene.add(haloMesh);
+}
+
+function pickNode(event) {
+  if (!nodesMesh) return;
+  const rect = renderer.domElement.getBoundingClientRect();
+  pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  const hit = raycaster.intersectObject(nodesMesh, false)[0];
+  if (!hit || hit.instanceId == null) return;
+  selectNode(hit.instanceId);
+}
+
+function selectNode(index) {
+  selectedIndex = index;
+  const node = normalizedNodes[index];
+  const position = positions[index];
+  els.panelTitle.textContent = node.label;
+  els.panelDetails.innerHTML = '';
+
+  const details = {
+    id: node.id,
+    type: node.type,
+    path: node.path,
+    size: node.size,
+    degree: degreeFor(node.id),
+    x: Math.round(position.x),
+    y: Math.round(position.y),
+    z: Math.round(position.z)
+  };
+
+  const extraKeys = Object.keys(node).filter((key) => !['id', 'label', 'name', 'size', 'color', 'x', 'y', 'z', 'type', 'path'].includes(key));
+  for (const key of extraKeys.slice(0, 12)) details[key] = stringifyValue(node[key]);
+
+  for (const [key, value] of Object.entries(details)) {
+    if (value === undefined || value === null || value === '') continue;
+    const dt = document.createElement('dt');
+    const dd = document.createElement('dd');
+    dt.textContent = key;
+    dd.textContent = String(value);
+    els.panelDetails.append(dt, dd);
+  }
+
+  haloMesh.visible = true;
+  haloMesh.position.copy(position);
+  haloMesh.scale.setScalar(Math.max(node.size * 1.65, 22));
+  haloMesh.lookAt(camera.position);
+  els.panel.classList.remove('hidden');
+}
+
+function degreeFor(id) {
+  return normalizedEdges.reduce((total, edge) => total + (edge.source === id || edge.target === id ? 1 : 0), 0);
+}
+
+function clearGraphObjects() {
+  for (const object of [nodesMesh, edgesLine, haloMesh]) {
+    if (!object) continue;
+    scene.remove(object);
+    object.geometry?.dispose?.();
+    object.material?.dispose?.();
+  }
+  nodesMesh = null;
+  edgesLine = null;
+  haloMesh = null;
+  selectedIndex = -1;
+}
+
+function fitCamera(announce = false) {
+  if (!positions.length) return;
   const box = new THREE.Box3();
-  for (const n of nodeObjects) box.expandByPoint(new THREE.Vector3(n.x,n.y,n.z));
-  const center = box.getCenter(new THREE.Vector3());
-  const size = box.getSize(new THREE.Vector3()).length();
-  controls.target.copy(center);
-  camera.position.copy(center).add(new THREE.Vector3(0,0, Math.max(200, size*1.2)));
+  for (const point of positions) box.expandByPoint(point);
+  const sphere = box.getBoundingSphere(new THREE.Sphere());
+  const radius = Math.max(sphere.radius, 80);
+  const distance = radius / Math.sin(THREE.MathUtils.degToRad(camera.fov * 0.48));
+
+  const direction = camera.position.clone().sub(controls.target);
+  if (direction.lengthSq() < 1) direction.set(0, 0, 1);
+  direction.normalize();
+
+  controls.target.copy(sphere.center);
+  camera.position.copy(sphere.center).add(direction.multiplyScalar(distance * 1.18));
+  camera.near = Math.max(0.1, distance / 1000);
+  camera.far = Math.max(5000, distance * 8);
+  camera.updateProjectionMatrix();
   controls.update();
+  if (announce) toast('View fitted');
 }
 
-function animate(){
+async function shareCurrentGraph() {
+  let url;
+  if (activeGraphUrl && activeGraphUrl !== DEFAULT_GRAPH_URL) {
+    const shareUrl = new URL(window.location.href);
+    shareUrl.searchParams.set('graph', activeGraphUrl);
+    url = shareUrl.toString();
+  } else {
+    url = `${window.location.origin}${window.location.pathname}`;
+  }
+
+  try {
+    await navigator.clipboard.writeText(url);
+    toast('Share link copied');
+  } catch {
+    window.prompt('Copy this graph link:', url);
+  }
+}
+
+function updateHud(sourceLabel) {
+  els.nodeCount.textContent = String(normalizedNodes.length);
+  els.edgeCount.textContent = String(normalizedEdges.length);
+  els.source.textContent = shortSource(sourceLabel || DEFAULT_GRAPH_URL);
+  els.status.textContent = `${normalizedNodes.length} nodes · ${normalizedEdges.length} edges`;
+}
+
+function setLoading(message) {
+  els.loading.textContent = message;
+  els.loading.classList.remove('hidden');
+  els.status.textContent = message;
+}
+
+function toast(message, timeout = 1700) {
+  els.toast.textContent = message;
+  els.toast.classList.remove('hidden');
+  window.clearTimeout(toast._timer);
+  toast._timer = window.setTimeout(() => els.toast.classList.add('hidden'), timeout);
+}
+
+function showError(error) {
+  console.error(error);
+  els.loading.textContent = error.message || 'Something failed while loading the graph.';
+  els.loading.classList.remove('hidden');
+  els.status.textContent = 'Graph load failed';
+  toast('Graph load failed', 2600);
+}
+
+function closePanel() {
+  els.panel.classList.add('hidden');
+  selectedIndex = -1;
+  if (haloMesh) haloMesh.visible = false;
+}
+
+function resizeRenderer() {
+  const { width, height } = viewportSize();
+  camera.aspect = width / height;
+  camera.updateProjectionMatrix();
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(width, height, false);
+}
+
+function animate() {
   requestAnimationFrame(animate);
   controls.update();
+  if (haloMesh?.visible) haloMesh.lookAt(camera.position);
   renderer.render(scene, camera);
 }
 
-// Simple 3D force-directed layout (Barnes-Hut not implemented — O(n^2) repulsion)
-function computeForceLayout3D(g, opts = {}){
-  const nodes = g.nodes;
-  const edges = g.edges || [];
-  const N = nodes.length;
-  const iterations = opts.iterations || 600;
-  const width = opts.width || 800;
-  const height = opts.height || 800;
-  const depth = opts.depth || 800;
+function viewportSize() {
+  const width = Math.max(1, els.viewer.clientWidth || window.innerWidth);
+  const height = Math.max(1, els.viewer.clientHeight || window.innerHeight);
+  return { width, height };
+}
 
-  // Initialize positions randomly in cube
-  for (let i=0;i<N;i++){
-    nodes[i].x = (Math.random()-0.5) * width;
-    nodes[i].y = (Math.random()-0.5) * height;
-    nodes[i].z = (Math.random()-0.5) * depth;
-    nodes[i].vx = 0; nodes[i].vy = 0; nodes[i].vz = 0;
-  }
+function finite(value) {
+  return Number.isFinite(Number(value));
+}
 
-  // Build edge lookup for springs
-  const springs = new Set();
-  for (const e of edges){
-    const a = String(e.source); const b = String(e.target);
-    springs.add(a + '|' + b);
-    springs.add(b + '|' + a);
-  }
+function clampNumber(value, min, max) {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, value));
+}
 
-  // Parameters
-  const k = Math.cbrt((width*height*depth) / N) || 30; // ideal distance
-  const repulsion = (k*k);
-  const stiffness = 0.06; // spring constant
-  let t = Math.max(width, height, depth)/10; // temperature
-  const cooling = 0.95;
-
-  for (let iter=0; iter<iterations; iter++){
-    // repulsive forces (O(n^2)) - OK for N up to ~1500
-    for (let i=0;i<N;i++){
-      let fx=0, fy=0, fz=0;
-      const ni = nodes[i];
-      for (let j=0;j<N;j++){
-        if (i===j) continue;
-        const nj = nodes[j];
-        let dx = ni.x - nj.x; let dy = ni.y - nj.y; let dz = ni.z - nj.z;
-        let dist2 = dx*dx + dy*dy + dz*dz + 0.01;
-        let dist = Math.sqrt(dist2);
-        // repulsive force
-        const F = repulsion / dist2;
-        fx += (dx/dist) * F;
-        fy += (dy/dist) * F;
-        fz += (dz/dist) * F;
-      }
-      ni.vx = (ni.vx + fx) * 0.6;
-      ni.vy = (ni.vy + fy) * 0.6;
-      ni.vz = (ni.vz + fz) * 0.6;
-    }
-
-    // attractive spring forces
-    for (const e of edges){
-      const si = nodes.findIndex(n => String(n.id) === String(e.source));
-      const ti = nodes.findIndex(n => String(n.id) === String(e.target));
-      if (si<0 || ti<0) continue;
-      const a = nodes[si]; const b = nodes[ti];
-      let dx = b.x - a.x; let dy = b.y - a.y; let dz = b.z - a.z;
-      let dist = Math.sqrt(dx*dx + dy*dy + dz*dz) + 0.01;
-      const force = stiffness * (dist - k);
-      const ux = (dx/dist) * force; const uy = (dy/dist) * force; const uz = (dz/dist) * force;
-      a.vx += ux; a.vy += uy; a.vz += uz;
-      b.vx -= ux; b.vy -= uy; b.vz -= uz;
-    }
-
-    // integrate + temperature clamp
-    for (let i=0;i<N;i++){
-      const n = nodes[i];
-      n.x += Math.max(-t, Math.min(t, n.vx));
-      n.y += Math.max(-t, Math.min(t, n.vy));
-      n.z += Math.max(-t, Math.min(t, n.vz));
-      // damp velocities
-      n.vx *= 0.7; n.vy *= 0.7; n.vz *= 0.7;
-    }
-
-    t *= cooling;
-    // occasional abort for mobile responsiveness
-    if (iter % 100 === 0){
-      // yield to UI
+function safeColor(value, index) {
+  if (typeof value === 'string') {
+    const color = new THREE.Color();
+    try {
+      color.set(value);
+      return value;
+    } catch {
+      // fall through to palette
     }
   }
+  const palette = ['#7dd3fc', '#a78bfa', '#22c55e', '#f59e0b', '#ec4899', '#facc15', '#38bdf8', '#fb7185'];
+  return palette[index % palette.length];
 }
 
-// Load graph by URL or fallback to embedded data
-async function loadGraphFromURL(url){
-  loadingEl.style.display = 'block';
-  try{
-    const res = await fetch(url, {cache: 'no-cache'});
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const json = await res.json();
-    buildSceneFromGraph(json);
-    showToast('Graph loaded');
-  }catch(err){
-    loadingEl.style.display = 'none';
-    console.error('Load graph failed', err);
-    showToast('Failed to load graph');
+function hashString(value) {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function stringifyValue(value) {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
   }
 }
 
-function loadEmbeddedGraph(){
-  return loadGraphFromURL('/data/graph.json');
-}
-
-fileInput.addEventListener('change', async (ev)=>{
-  const f = ev.target.files && ev.target.files[0];
-  if (!f) return;
-  const text = await f.text();
-  try{
-    const json = JSON.parse(text);
-    buildSceneFromGraph(json);
-  }catch(err){
-    alert('Invalid JSON: ' + err.message);
+function shortSource(value) {
+  if (!value) return 'Local file';
+  try {
+    const url = new URL(value, window.location.origin);
+    if (url.origin === window.location.origin) return url.pathname;
+    return url.hostname + url.pathname;
+  } catch {
+    return String(value);
   }
-});
-
-fitBtn.addEventListener('click', ()=>{fitToNodes(); showToast('Fitted');});
-closePanel.addEventListener('click', ()=>{panel.classList.add('hidden'); panel.setAttribute('aria-hidden','true');});
-
-shareBtn.addEventListener('click', ()=>{
-  const base = location.origin + location.pathname;
-  const params = new URLSearchParams(location.search);
-  const graphParam = params.get('graph') || '/data/graph.json';
-  const url = base + '?graph=' + encodeURIComponent(graphParam);
-  navigator.clipboard?.writeText(url).then(()=> showToast('Link copied'), ()=> showToast('Copy failed'));
-});
-
-function getGraphParam(){
-  const params = new URLSearchParams(location.search);
-  return params.get('graph');
-}
-
-async function start(){
-  initThree();
-  animate();
-  const external = getGraphParam();
-  if (external){
-    await loadGraphFromURL(external);
-  } else {
-    await loadEmbeddedGraph();
-  }
-}
-
-start();
-
-// small utility to compute approximate camera distance
-OrbitControls.prototype.getDistance = function(){
-  return camera.position.distanceTo(this.target);
 }
