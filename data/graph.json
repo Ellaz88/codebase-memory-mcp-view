@@ -1,0 +1,15 @@
+{
+  "nodes": [
+    { "id": "1", "name": "App", "label": "App", "x": 0, "y": 0, "z": 0, "size": 40, "color": "#60a5fa" },
+    { "id": "2", "name": "AuthService", "label": "AuthService", "x": 160, "y": 40, "z": -40, "size": 30, "color": "#34d399" },
+    { "id": "3", "name": "DB", "label": "DB", "x": -120, "y": -40, "z": 20, "size": 30, "color": "#f472b6" },
+    { "id": "4", "name": "API", "label": "API", "x": 0, "y": 200, "z": 40, "size": 30, "color": "#f59e0b" }
+  ],
+  "edges": [
+    { "source": "1", "target": "2", "type": "uses" },
+    { "source": "1", "target": "4", "type": "calls" },
+    { "source": "4", "target": "3", "type": "reads" },
+    { "source": "2", "target": "3", "type": "authz" }
+  ],
+  "total_nodes": 4
+}
